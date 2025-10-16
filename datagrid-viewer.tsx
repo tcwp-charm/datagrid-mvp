@@ -8,12 +8,12 @@ export default function DataGridViewer() {
   const [drawnArea, setDrawnArea] = useState(null);
   const [isDrawing, setIsDrawing] = useState(false);
   const [drawPoints, setDrawPoints] = useState([]);
-  const [mapCenter, setMapCenter] = useState({ lat: 39.8283, lon: -98.5795, zoom: 5 });
+  const [mapCenter, setMapCenter] = useState({ lat: 31.0, lon: -100.0, zoom: 6 }); // Texas default
   const [vectorData, setVectorData] = useState([]);
   const [filteredData, setFilteredData] = useState([]);
   const [isPanning, setIsPanning] = useState(false);
   const [panStart, setPanStart] = useState({ x: 0, y: 0 });
-  const [lastMapCenter, setLastMapCenter] = useState({ lat: 39.8283, lon: -98.5795 });
+  const [lastMapCenter, setLastMapCenter] = useState({ lat: 31.0, lon: -100.0 });
   const [searchQuery, setSearchQuery] = useState('');
   const [searchResults, setSearchResults] = useState([]);
   const [showSearchResults, setShowSearchResults] = useState(false);
@@ -41,6 +41,17 @@ export default function DataGridViewer() {
   const [zoomBoxStart, setZoomBoxStart] = useState(null);
   const [zoomBoxEnd, setZoomBoxEnd] = useState(null);
   const [userLocation, setUserLocation] = useState(null);
+  const [identifyMode, setIdentifyMode] = useState(false);
+  const [selectedFeature, setSelectedFeature] = useState(null);
+  const [showAttributePanel, setShowAttributePanel] = useState(false);
+  const [toolboxExpanded, setToolboxExpanded] = useState(false);
+  const [showLegend, setShowLegend] = useState(false);
+  const [showBasemapSelector, setShowBasemapSelector] = useState(false);
+  const [selectedBasemap, setSelectedBasemap] = useState('street');
+  const [expandedToolSection, setExpandedToolSection] = useState('discover');
+  
+  // Default extent for Texas
+  const TEXAS_DEFAULT_VIEW = { lat: 31.0, lon: -100.0, zoom: 6 };
   const [layers, setLayers] = useState([
     { id: 2, name: 'Major Cities (US & Canada)', type: 'vector', visible: false, opacity: 80 },
     { id: 3, name: 'National Parks', type: 'vector', visible: false, opacity: 100 },
@@ -134,6 +145,9 @@ export default function DataGridViewer() {
       if (cityDropdownRef.current && !cityDropdownRef.current.contains(event.target)) {
         setShowCityDropdown(false);
         setCitySearchQuery('');
+      }
+      if (menuDropdownRef.current && !menuDropdownRef.current.contains(event.target)) {
+        setShowMenuDropdown(false);
       }
     };
     document.addEventListener('mousedown', handleClickOutside);
@@ -295,6 +309,14 @@ export default function DataGridViewer() {
     const servers = ['a', 'b', 'c'];
     let serverIndex = 0;
     
+    // Basemap URLs
+    const basemapUrls = {
+      street: (server, z, x, y) => `https://${server}.tile.openstreetmap.org/${z}/${x}/${y}.png`,
+      satellite: (server, z, x, y) => `https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/${z}/${y}/${x}`,
+      light: (server, z, x, y) => `https://${server}.basemaps.cartocdn.com/light_all/${z}/${x}/${y}.png`,
+      dark: (server, z, x, y) => `https://${server}.basemaps.cartocdn.com/dark_all/${z}/${x}/${y}.png`
+    };
+    
     for (let x = centerTileX - Math.ceil(tilesWide / 2); x <= centerTileX + Math.ceil(tilesWide / 2); x++) {
       for (let y = centerTileY - Math.ceil(tilesHigh / 2); y <= centerTileY + Math.ceil(tilesHigh / 2); y++) {
         if (x >= 0 && y >= 0 && x < Math.pow(2, zoom) && y < Math.pow(2, zoom)) {
@@ -304,7 +326,8 @@ export default function DataGridViewer() {
           const pos = latLonToPixel(tileLat, tileLon);
           const server = servers[serverIndex % servers.length];
           serverIndex++;
-          tiles.push({ x, y, z: zoom, url: `https://${server}.tile.openstreetmap.org/${zoom}/${x}/${y}.png`, left: pos.x, top: pos.y });
+          const url = basemapUrls[selectedBasemap](server, zoom, x, y);
+          tiles.push({ x, y, z: zoom, url, left: pos.x, top: pos.y });
         }
       }
     }
@@ -318,6 +341,30 @@ export default function DataGridViewer() {
 
   const handleMapMouseDown = (e) => {
     setShowSearchResults(false);
+    
+    if (identifyMode) {
+      const rect = mapRef.current.getBoundingClientRect();
+      const x = e.clientX - rect.left;
+      const y = e.clientY - rect.top;
+      const clickLatLon = pixelToLatLon(x, y);
+      
+      // Check if click is on any imported polygon
+      const clickedFeature = filteredData.find(item => {
+        if (item.type === 'imported_polygon' && item.points && item.points.length > 0) {
+          return isPointInPolygon(clickLatLon.lat, clickLatLon.lon, item.points);
+        }
+        return false;
+      });
+      
+      if (clickedFeature) {
+        setSelectedFeature(clickedFeature);
+        setShowAttributePanel(true);
+      } else {
+        setSelectedFeature(null);
+        setShowAttributePanel(false);
+      }
+      return;
+    }
     
     if (zoomBoxMode) {
       const rect = mapRef.current.getBoundingClientRect();
@@ -382,23 +429,42 @@ export default function DataGridViewer() {
         const latRange = Math.abs(topLeft.lat - bottomRight.lat);
         const lonRange = Math.abs(topLeft.lon - bottomRight.lon);
         
-        let zoom = 10;
-        if (latRange > 20 || lonRange > 20) zoom = 4;
-        else if (latRange > 10 || lonRange > 10) zoom = 5;
-        else if (latRange > 5 || lonRange > 5) zoom = 6;
-        else if (latRange > 2 || lonRange > 2) zoom = 7;
-        else if (latRange > 1 || lonRange > 1) zoom = 8;
-        else if (latRange > 0.5 || lonRange > 0.5) zoom = 9;
-        else if (latRange > 0.2 || lonRange > 0.2) zoom = 11;
-        else if (latRange > 0.1 || lonRange > 0.1) zoom = 12;
-        else zoom = 13;
+        // Calculate zoom level based on the box size relative to viewport
+        const rect = mapRef.current.getBoundingClientRect();
+        const boxWidthRatio = (maxX - minX) / rect.width;
+        const boxHeightRatio = (maxY - minY) / rect.height;
         
-        setMapCenter({ lat: centerLat, lon: centerLon, zoom: zoom + 1 });
+        // Use the smaller ratio to ensure entire box fits
+        const ratio = Math.min(boxWidthRatio, boxHeightRatio);
+        
+        // Calculate zoom adjustment - smaller box means zoom in more
+        let zoomAdjust = 0;
+        if (ratio < 0.1) zoomAdjust = 3;
+        else if (ratio < 0.2) zoomAdjust = 2;
+        else if (ratio < 0.4) zoomAdjust = 1;
+        else if (ratio < 0.7) zoomAdjust = 0;
+        else zoomAdjust = -1;
+        
+        // Base zoom calculation on geographic extent
+        let baseZoom = 10;
+        if (latRange > 20 || lonRange > 20) baseZoom = 4;
+        else if (latRange > 10 || lonRange > 10) baseZoom = 5;
+        else if (latRange > 5 || lonRange > 5) baseZoom = 6;
+        else if (latRange > 2 || lonRange > 2) baseZoom = 7;
+        else if (latRange > 1 || lonRange > 1) baseZoom = 8;
+        else if (latRange > 0.5 || lonRange > 0.5) baseZoom = 9;
+        else if (latRange > 0.2 || lonRange > 0.2) baseZoom = 11;
+        else if (latRange > 0.1 || lonRange > 0.1) baseZoom = 12;
+        else if (latRange > 0.05 || lonRange > 0.05) baseZoom = 13;
+        else baseZoom = 14;
+        
+        const finalZoom = Math.min(18, Math.max(1, baseZoom + zoomAdjust));
+        
+        setMapCenter({ lat: centerLat, lon: centerLon, zoom: finalZoom });
       }
       
       setZoomBoxStart(null);
       setZoomBoxEnd(null);
-      setZoomBoxMode(false);
     } else if (drawMode && isDrawing && drawPoints.length > 2) {
       setIsDrawing(false);
       
@@ -448,43 +514,104 @@ export default function DataGridViewer() {
     }));
   };
 
-  const getUserLocation = () => {
-    // Use IP-based geolocation API
-    fetch('https://ipapi.co/json/')
-      .then(response => response.json())
-      .then(data => {
-        if (data.latitude && data.longitude) {
-          const userLat = data.latitude;
-          const userLon = data.longitude;
-          setUserLocation({ lat: userLat, lon: userLon });
-          setMapCenter({ lat: userLat, lon: userLon, zoom: 12 });
-        } else {
-          alert('Unable to determine your location from IP address.');
-        }
-      })
-      .catch(error => {
-        // Fallback to another IP geolocation service
-        fetch('https://api.ipify.org?format=json')
-          .then(response => response.json())
-          .then(data => {
-            return fetch(`https://freeipapi.com/api/json/${data.ip}`);
-          })
-          .then(response => response.json())
-          .then(data => {
-            if (data.latitude && data.longitude) {
-              const userLat = data.latitude;
-              const userLon = data.longitude;
-              setUserLocation({ lat: userLat, lon: userLon });
-              setMapCenter({ lat: userLat, lon: userLon, zoom: 12 });
-            } else {
-              alert('Unable to determine your location. Please try again.');
-            }
-          })
-          .catch(err => {
-            console.error('Error getting location:', err);
-            alert('Unable to get your location. Please check your internet connection.');
-          });
-      });
+  const getUserLocation = async () => {
+    try {
+      // First, try ipapi.co
+      const response = await fetch('https://ipapi.co/json/');
+      const data = await response.json();
+      
+      if (data.latitude && data.longitude) {
+        const userLat = parseFloat(data.latitude);
+        const userLon = parseFloat(data.longitude);
+        console.log('Location found:', { lat: userLat, lon: userLon, city: data.city, region: data.region });
+        setUserLocation({ lat: userLat, lon: userLon });
+        setMapCenter({ lat: userLat, lon: userLon, zoom: 11 });
+        return;
+      }
+    } catch (error) {
+      console.error('ipapi.co failed:', error);
+    }
+
+    try {
+      // Fallback: try ip-api.com
+      const response = await fetch('http://ip-api.com/json/');
+      const data = await response.json();
+      
+      if (data.status === 'success' && data.lat && data.lon) {
+        const userLat = parseFloat(data.lat);
+        const userLon = parseFloat(data.lon);
+        console.log('Location found via fallback:', { lat: userLat, lon: userLon, city: data.city, region: data.regionName });
+        setUserLocation({ lat: userLat, lon: userLon });
+        setMapCenter({ lat: userLat, lon: userLon, zoom: 11 });
+        return;
+      }
+    } catch (error) {
+      console.error('ip-api.com failed:', error);
+    }
+
+    try {
+      // Second fallback: try ipwhois
+      const response = await fetch('https://ipwho.is/');
+      const data = await response.json();
+      
+      if (data.latitude && data.longitude) {
+        const userLat = parseFloat(data.latitude);
+        const userLon = parseFloat(data.longitude);
+        console.log('Location found via second fallback:', { lat: userLat, lon: userLon, city: data.city, region: data.region });
+        setUserLocation({ lat: userLat, lon: userLon });
+        setMapCenter({ lat: userLat, lon: userLon, zoom: 11 });
+        return;
+      }
+    } catch (error) {
+      console.error('ipwho.is failed:', error);
+    }
+
+    // If all fail, show error
+    alert('Unable to determine your location. Please check your internet connection or try again later.');
+  };
+
+  const goToTexasHome = () => {
+    setMapCenter(TEXAS_DEFAULT_VIEW);
+    setSelectedFeature(null);
+    setShowAttributePanel(false);
+  };
+
+  const zoomToLayer = (layerId) => {
+    let layerFeatures = [];
+    
+    if (layerId === 2) {
+      // Major Cities layer
+      layerFeatures = filteredData.filter(d => d.type === 'city');
+    } else if (layerId === 3) {
+      // National Parks layer
+      layerFeatures = filteredData.filter(d => d.type === 'park');
+    } else if (layerId === 4) {
+      // Imported Data layer
+      layerFeatures = filteredData.filter(d => d.type === 'imported_polygon');
+    }
+    
+    if (layerFeatures.length === 0) {
+      alert('No features found in this layer');
+      return;
+    }
+    
+    // Collect all coordinates
+    const allCoords = [];
+    layerFeatures.forEach(feature => {
+      if (feature.type === 'city' || feature.type === 'park') {
+        allCoords.push({ lat: feature.lat, lon: feature.lon });
+      } else if (feature.type === 'imported_polygon' && feature.points) {
+        feature.points.forEach(p => allCoords.push({ lat: p.lat, lon: p.lon }));
+      }
+    });
+    
+    if (allCoords.length === 0) {
+      alert('No coordinates found for this layer');
+      return;
+    }
+    
+    const bbox = calculateBoundingBox(allCoords);
+    zoomToExtent(bbox);
   };
 
   const isPointInPolygon = (lat, lon, polygon) => {
@@ -888,7 +1015,12 @@ export default function DataGridViewer() {
         </div>
         <div className="text-white p-4" style={{ backgroundColor: '#500000' }}>
           <h1 className="text-lg font-bold flex items-center gap-2">
-            <Map size={24} />
+            <svg width="24" height="24" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+              <rect x="2" y="2" width="8" height="8" fill="white" stroke="white" strokeWidth="1"/>
+              <rect x="14" y="2" width="8" height="8" fill="white" stroke="white" strokeWidth="1"/>
+              <rect x="2" y="14" width="8" height="8" fill="white" stroke="white" strokeWidth="1"/>
+              <rect x="14" y="14" width="8" height="8" fill="white" stroke="white" strokeWidth="1"/>
+            </svg>
             DataGrid Viewer
           </h1>
         </div>
@@ -949,6 +1081,16 @@ export default function DataGridViewer() {
                         </>
                       )}
                     </div>
+                    {layer.id !== 1 && layer.visible && (
+                      <button
+                        onClick={() => zoomToLayer(layer.id)}
+                        className="text-gray-600 hover:text-gray-800 p-1 rounded hover:bg-gray-200"
+                        title="Zoom to layer extent"
+                        style={{ color: '#500000' }}
+                      >
+                        <Maximize2 size={16} />
+                      </button>
+                    )}
                   </div>
                   <div className="mt-2">
                     <div className="flex items-center justify-between text-xs text-gray-600 mb-1">
@@ -1130,49 +1272,183 @@ export default function DataGridViewer() {
 
           {activeTab === 'tools' && (
             <div className="space-y-3">
-              <button 
-                onClick={() => setShowImportModal(true)}
-                className="w-full text-left px-4 py-3 rounded border text-sm font-medium bg-gray-50 hover:bg-gray-100 border-gray-200"
-              >
-                <Upload className="inline mr-2" size={16} />
-                Import GeoJSON Data
-              </button>
+              <div className="bg-gray-50 border border-gray-200 rounded-lg p-3 mb-4">
+                <h3 className="font-semibold text-sm mb-2" style={{ color: '#500000' }}>About DataGrid®</h3>
+                <p className="text-xs text-gray-700 leading-relaxed">
+                  Access high-resolution spatial data standardized into 2.5-acre grids. Discover comprehensive datasets for community planning, disaster mitigation, and land-use analysis.
+                </p>
+              </div>
 
-              <button 
-                onClick={() => { 
-                  if (drawMode) {
-                    clearDrawing();
-                    setDrawMode(false);
-                  } else {
-                    setDrawMode(true);
-                  }
-                }} 
-                className={`w-full text-left px-4 py-3 rounded border text-sm font-medium ${drawMode ? 'border-gray-200' : 'bg-gray-50 hover:bg-gray-100 border-gray-200'}`}
-                style={drawMode ? { backgroundColor: '#fef2f2', borderColor: '#500000', color: '#500000' } : {}}
-              >
-                <Edit3 className="inline mr-2" size={16} />
-                {drawMode ? 'Exit Drawing Mode' : 'Smart Draw Area'}
-              </button>
+              {/* Discover & Explore Section */}
+              <div className="border border-gray-200 rounded-lg overflow-hidden">
+                <button 
+                  onClick={() => setExpandedToolSection(expandedToolSection === 'discover' ? null : 'discover')}
+                  className="w-full flex items-center justify-between px-4 py-3 bg-gray-50 hover:bg-gray-100 transition-colors"
+                >
+                  <h4 className="font-semibold text-xs text-gray-700 uppercase tracking-wide">Discover & Explore</h4>
+                  <ChevronDown 
+                    size={16} 
+                    className={`text-gray-500 transition-transform ${expandedToolSection === 'discover' ? 'rotate-180' : ''}`}
+                  />
+                </button>
+                
+                {expandedToolSection === 'discover' && (
+                  <div className="p-2 space-y-2 bg-white">
+                    <button 
+                      onClick={() => { 
+                        setShowImportModal(true);
+                      }}
+                      className="w-full text-left px-4 py-3 rounded border text-sm font-medium bg-white hover:bg-gray-50 border-gray-200 flex items-center justify-between"
+                    >
+                      <div className="flex items-center gap-3">
+                        <Search className="flex-shrink-0" size={18} style={{ color: '#500000' }} />
+                        <div>
+                          <div className="font-semibold">Explore Grid Data</div>
+                          <div className="text-xs text-gray-600">Load and explore 2.5-acre grid datasets</div>
+                        </div>
+                      </div>
+                    </button>
 
-              {drawnArea && (
-                <>
-                  <button 
-                    onClick={extractGeoJSON}
-                    className="w-full text-left px-4 py-3 rounded border text-sm font-medium bg-green-50 hover:bg-green-100 border-green-200 text-green-700"
-                  >
-                    <Download className="inline mr-2" size={16} />
-                    Extract from DataGrid
-                  </button>
+                    <button 
+                      onClick={() => { 
+                        if (drawMode) {
+                          clearDrawing();
+                          setDrawMode(false);
+                        } else {
+                          setDrawMode(true);
+                        }
+                      }} 
+                      className={`w-full text-left px-4 py-3 rounded border text-sm font-medium ${drawMode ? 'border-gray-200' : 'bg-white hover:bg-gray-50 border-gray-200'} flex items-center justify-between`}
+                      style={drawMode ? { backgroundColor: '#fef2f2', borderColor: '#500000' } : {}}
+                    >
+                      <div className="flex items-center gap-3">
+                        <Edit3 className="flex-shrink-0" size={18} style={drawMode ? { color: '#500000' } : { color: '#500000' }} />
+                        <div>
+                          <div className="font-semibold">Define Area of Interest</div>
+                          <div className="text-xs text-gray-600">Draw polygon to select grid cells</div>
+                        </div>
+                      </div>
+                    </button>
 
-                  <button 
-                    onClick={() => setShowSubmitModal(true)}
-                    className="w-full text-left px-4 py-3 rounded border text-sm font-medium bg-purple-50 hover:bg-purple-100 border-purple-200 text-purple-700"
-                  >
-                    <Upload className="inline mr-2" size={16} />
-                    Submit Area to API
-                  </button>
-                </>
-              )}
+                    <button 
+                      onClick={() => {
+                        setIdentifyMode(!identifyMode);
+                        if (identifyMode) {
+                          setSelectedFeature(null);
+                          setShowAttributePanel(false);
+                        }
+                      }}
+                      className={`w-full text-left px-4 py-3 rounded border text-sm font-medium ${identifyMode ? 'border-gray-200' : 'bg-white hover:bg-gray-50 border-gray-200'} flex items-center justify-between`}
+                      style={identifyMode ? { backgroundColor: '#fef2f2', borderColor: '#500000' } : {}}
+                    >
+                      <div className="flex items-center gap-3">
+                        <Info className="flex-shrink-0" size={18} style={identifyMode ? { color: '#500000' } : { color: '#500000' }} />
+                        <div>
+                          <div className="font-semibold">View Grid Attributes</div>
+                          <div className="text-xs text-gray-600">Click grid cells to see all data attributes</div>
+                        </div>
+                      </div>
+                    </button>
+                  </div>
+                )}
+              </div>
+
+              {/* Access & Extract Section */}
+              <div className="border border-gray-200 rounded-lg overflow-hidden">
+                <button 
+                  onClick={() => setExpandedToolSection(expandedToolSection === 'extract' ? null : 'extract')}
+                  className="w-full flex items-center justify-between px-4 py-3 bg-gray-50 hover:bg-gray-100 transition-colors"
+                >
+                  <h4 className="font-semibold text-xs text-gray-700 uppercase tracking-wide">Access & Extract</h4>
+                  <ChevronDown 
+                    size={16} 
+                    className={`text-gray-500 transition-transform ${expandedToolSection === 'extract' ? 'rotate-180' : ''}`}
+                  />
+                </button>
+                
+                {expandedToolSection === 'extract' && (
+                  <div className="p-2 space-y-2 bg-white">
+                    {drawnArea && (
+                      <>
+                        <button 
+                          onClick={extractGeoJSON}
+                          className="w-full text-left px-4 py-3 rounded border text-sm font-medium bg-green-50 hover:bg-green-100 border-green-200 flex items-center justify-between"
+                          style={{ backgroundColor: '#f0fdf4', borderColor: '#22c55e' }}
+                        >
+                          <div className="flex items-center gap-3">
+                            <Download className="flex-shrink-0" size={18} style={{ color: '#16a34a' }} />
+                            <div>
+                              <div className="font-semibold" style={{ color: '#16a34a' }}>Download Selected Area</div>
+                              <div className="text-xs text-gray-600">{filteredData.length} features • Export as GeoJSON</div>
+                            </div>
+                          </div>
+                        </button>
+
+                        <button 
+                          onClick={() => setShowSubmitModal(true)}
+                          className="w-full text-left px-4 py-3 rounded border text-sm font-medium bg-purple-50 hover:bg-purple-100 border-purple-200 flex items-center justify-between"
+                        >
+                          <div className="flex items-center gap-3">
+                            <Upload className="flex-shrink-0" size={18} style={{ color: '#9333ea' }} />
+                            <div>
+                              <div className="font-semibold" style={{ color: '#9333ea' }}>Share to API</div>
+                              <div className="text-xs text-gray-600">Send selected area to external service</div>
+                            </div>
+                          </div>
+                        </button>
+                      </>
+                    )}
+                    
+                    {!drawnArea && (
+                      <div className="px-4 py-6 text-center text-xs text-gray-500 italic bg-gray-50 rounded border border-gray-200">
+                        Draw an area of interest to enable data extraction
+                      </div>
+                    )}
+                  </div>
+                )}
+              </div>
+
+              {/* Documentation Section */}
+              <div className="border border-gray-200 rounded-lg overflow-hidden">
+                <button 
+                  onClick={() => setExpandedToolSection(expandedToolSection === 'docs' ? null : 'docs')}
+                  className="w-full flex items-center justify-between px-4 py-3 bg-gray-50 hover:bg-gray-100 transition-colors"
+                >
+                  <h4 className="font-semibold text-xs text-gray-700 uppercase tracking-wide">Documentation</h4>
+                  <ChevronDown 
+                    size={16} 
+                    className={`text-gray-500 transition-transform ${expandedToolSection === 'docs' ? 'rotate-180' : ''}`}
+                  />
+                </button>
+                
+                {expandedToolSection === 'docs' && (
+                  <div className="p-2 space-y-2 bg-white">
+                    <button 
+                      className="w-full text-left px-4 py-3 rounded border text-sm font-medium bg-white hover:bg-gray-50 border-gray-200 flex items-center justify-between"
+                    >
+                      <div className="flex items-center gap-3">
+                        <FileText className="flex-shrink-0" size={18} style={{ color: '#500000' }} />
+                        <div>
+                          <div className="font-semibold">Data Dictionary</div>
+                          <div className="text-xs text-gray-600">View all available grid attributes & metadata</div>
+                        </div>
+                      </div>
+                    </button>
+
+                    <button 
+                      className="w-full text-left px-4 py-3 rounded border text-sm font-medium bg-white hover:bg-gray-50 border-gray-200 flex items-center justify-between"
+                    >
+                      <div className="flex items-center gap-3">
+                        <Link className="flex-shrink-0" size={18} style={{ color: '#500000' }} />
+                        <div>
+                          <div className="font-semibold">API Documentation</div>
+                          <div className="text-xs text-gray-600">Learn how to integrate DataGrid® into your apps</div>
+                        </div>
+                      </div>
+                    </button>
+                  </div>
+                )}
+              </div>
             </div>
           )}
         </div>
@@ -1240,7 +1516,7 @@ export default function DataGridViewer() {
           </div>
         </div>
 
-        <div ref={mapRef} className={`flex-1 relative bg-gray-100 overflow-hidden ${zoomBoxMode ? 'cursor-crosshair' : drawMode ? 'cursor-crosshair' : isPanning ? 'cursor-grabbing' : 'cursor-grab'}`} onMouseDown={handleMapMouseDown} onMouseMove={handleMapMouseMove} onMouseUp={handleMapMouseUp} onMouseLeave={() => { 
+        <div ref={mapRef} className={`flex-1 relative bg-gray-100 overflow-hidden ${identifyMode ? 'cursor-help' : zoomBoxMode ? 'cursor-crosshair' : drawMode ? 'cursor-crosshair' : isPanning ? 'cursor-grabbing' : 'cursor-grab'}`} onMouseDown={handleMapMouseDown} onMouseMove={handleMapMouseMove} onMouseUp={handleMapMouseUp} onMouseLeave={() => { 
           setIsDrawing(false);
           setIsPanning(false);
           setZoomBoxStart(null);
@@ -1258,11 +1534,11 @@ export default function DataGridViewer() {
             <svg className="absolute inset-0" style={{ width: '100%', height: '100%', pointerEvents: 'none', opacity: layers.find(l => l.id === 2).opacity / 100 }}>
               {filteredData.filter(d => d.type === 'city').map(city => {
                 const pos = latLonToPixel(city.lat, city.lon);
-                const size = Math.log(city.population) * 2;
+                const size = Math.max(3, Math.min(8, Math.log(city.population) * 0.6));
                 return (
                   <g key={city.id}>
-                    <circle cx={pos.x} cy={pos.y} r={size} fill={getCategoryColor(city.category)} fillOpacity="0.6" stroke={getCategoryColor(city.category)} strokeWidth="2" />
-                    <text x={pos.x} y={pos.y - size - 5} fontSize="11" fontWeight="bold" fill="#1f2937" textAnchor="middle">{city.name}</text>
+                    <circle cx={pos.x} cy={pos.y} r={size} fill={getCategoryColor(city.category)} fillOpacity="0.7" stroke="white" strokeWidth="1.5" />
+                    <text x={pos.x} y={pos.y - size - 4} fontSize="10" fontWeight="600" fill="#1f2937" textAnchor="middle" style={{ textShadow: '1px 1px 2px white, -1px -1px 2px white, 1px -1px 2px white, -1px 1px 2px white' }}>{city.name}</text>
                   </g>
                 );
               })}
@@ -1356,8 +1632,16 @@ export default function DataGridViewer() {
             </div>
           )}
 
-          {/* Zoom Controls */}
+          {identifyMode && (
+            <div className="absolute top-6 left-1/2 transform -translate-x-1/2 text-white px-4 py-2 rounded-full shadow-lg text-sm font-medium z-50" style={{ backgroundColor: '#500000' }}>
+              <Info className="inline mr-2" size={16} />
+              Identify Mode - Click on a feature
+            </div>
+          )}
+
+          {/* Navigation Toolbox */}
           <div className="absolute bottom-32 right-6 bg-white rounded-lg shadow-lg overflow-hidden">
+            {/* Always visible - Most commonly used tools */}
             <button 
               onClick={() => setMapCenter({ ...mapCenter, zoom: Math.min(mapCenter.zoom + 1, 18) })} 
               className="p-3 hover:bg-gray-100 border-b border-gray-200 block w-full"
@@ -1372,55 +1656,273 @@ export default function DataGridViewer() {
             >
               <ZoomOut size={20} />
             </button>
+            
+            {/* Collapsible section - Additional tools */}
+            {toolboxExpanded && (
+              <>
+                <button 
+                  onClick={goToTexasHome}
+                  className="p-3 hover:bg-gray-100 border-b border-gray-200 block w-full"
+                  title="Texas Home View"
+                >
+                  <Home size={20} />
+                </button>
+                <button 
+                  onClick={() => {
+                    setIdentifyMode(!identifyMode);
+                    if (identifyMode) {
+                      setSelectedFeature(null);
+                      setShowAttributePanel(false);
+                    }
+                  }}
+                  className={`p-3 hover:bg-gray-100 border-b border-gray-200 block w-full ${identifyMode ? 'bg-red-50' : ''}`}
+                  title="Identify Feature"
+                  style={identifyMode ? { backgroundColor: '#fef2f2' } : {}}
+                >
+                  <Info size={20} style={identifyMode ? { color: '#500000' } : {}} />
+                </button>
+                <button 
+                  onClick={() => {
+                    setZoomBoxMode(!zoomBoxMode);
+                    setZoomBoxStart(null);
+                    setZoomBoxEnd(null);
+                  }}
+                  className={`p-3 hover:bg-gray-100 border-b border-gray-200 block w-full ${zoomBoxMode ? 'bg-red-50' : ''}`}
+                  title="Zoom to Area"
+                  style={zoomBoxMode ? { backgroundColor: '#fef2f2' } : {}}
+                >
+                  <Maximize2 size={20} style={zoomBoxMode ? { color: '#500000' } : {}} />
+                </button>
+                <button 
+                  onClick={getUserLocation}
+                  className="p-3 hover:bg-gray-100 border-b border-gray-200 block w-full"
+                  title="My Location"
+                >
+                  <MapPin size={20} />
+                </button>
+              </>
+            )}
+            
+            {/* Toggle button */}
             <button 
-              onClick={() => {
-                setZoomBoxMode(!zoomBoxMode);
-                setZoomBoxStart(null);
-                setZoomBoxEnd(null);
-              }}
-              className={`p-3 hover:bg-gray-100 border-b border-gray-200 block w-full ${zoomBoxMode ? 'bg-red-50' : ''}`}
-              title="Zoom to Area"
-              style={zoomBoxMode ? { backgroundColor: '#fef2f2' } : {}}
-            >
-              <Maximize2 size={20} style={zoomBoxMode ? { color: '#500000' } : {}} />
-            </button>
-            <button 
-              onClick={getUserLocation}
+              onClick={() => setToolboxExpanded(!toolboxExpanded)}
               className="p-3 hover:bg-gray-100 block w-full"
-              title="My Location"
+              title={toolboxExpanded ? "Show fewer tools" : "Show more tools"}
+              style={{ backgroundColor: toolboxExpanded ? '#fef2f2' : 'white' }}
             >
-              <MapPin size={20} />
+              <Menu size={20} style={toolboxExpanded ? { color: '#500000' } : {}} />
             </button>
           </div>
 
-          <div className="absolute bottom-6 right-6 bg-white rounded-lg shadow-lg p-4">
-            <h4 className="font-semibold text-sm mb-3">Legend</h4>
-            <div className="space-y-2 text-xs">
-              {layers.find(l => l.id === 2)?.visible && selectedFeatureTypes.includes('city') && (
-                <div className="flex items-center gap-2">
-                  <div className="w-6 h-4 rounded bg-red-500"></div>
-                  <span>Cities</span>
+          {/* Attribute Panel */}
+          {showAttributePanel && selectedFeature && (
+            <div className="absolute top-6 right-6 bg-white rounded-lg shadow-xl border-2 max-w-md z-50 overflow-hidden" style={{ borderColor: '#500000', maxHeight: '80vh' }}>
+              <div className="text-white px-4 py-3 flex items-center justify-between" style={{ backgroundColor: '#500000' }}>
+                <h3 className="font-bold text-lg flex items-center gap-2">
+                  <Info size={20} />
+                  Feature Attributes
+                </h3>
+                <button 
+                  onClick={() => {
+                    setShowAttributePanel(false);
+                    setSelectedFeature(null);
+                  }}
+                  className="text-white hover:bg-red-900 rounded p-1"
+                >
+                  <X size={20} />
+                </button>
+              </div>
+              <div className="p-4 overflow-y-auto" style={{ maxHeight: 'calc(80vh - 60px)' }}>
+                <div className="mb-4">
+                  <h4 className="font-semibold text-lg mb-2" style={{ color: '#500000' }}>{selectedFeature.name}</h4>
+                  <p className="text-sm text-gray-600">Type: {selectedFeature.type === 'imported_polygon' ? 'Imported Polygon' : selectedFeature.type}</p>
                 </div>
-              )}
-              {layers.find(l => l.id === 3)?.visible && selectedFeatureTypes.includes('park') && (
-                <div className="flex items-center gap-2">
-                  <div className="w-6 h-4 rounded bg-green-500"></div>
-                  <span>Parks</span>
-                </div>
-              )}
-              {layers.find(l => l.id === 4)?.visible && selectedFeatureTypes.includes('imported_polygon') && (
-                <div className="flex items-center gap-2">
-                  <div className="w-6 h-4 rounded border-2 border-purple-500 bg-purple-500 bg-opacity-20"></div>
-                  <span>Imported Polygons</span>
-                </div>
-              )}
-              {userLocation && (
-                <div className="flex items-center gap-2">
-                  <MapPin size={16} style={{ color: '#500000' }} />
-                  <span>Your Location</span>
-                </div>
-              )}
+                
+                {selectedFeature.properties && Object.keys(selectedFeature.properties).length > 0 ? (
+                  <div>
+                    <h5 className="font-semibold mb-2 text-sm" style={{ color: '#500000' }}>Properties:</h5>
+                    <div className="space-y-2">
+                      {Object.entries(selectedFeature.properties).map(([key, value]) => (
+                        <div key={key} className="border-b border-gray-200 pb-2">
+                          <div className="text-xs font-semibold text-gray-600 uppercase">{key}</div>
+                          <div className="text-sm text-gray-900 break-words">
+                            {value !== null && value !== undefined ? String(value) : 'N/A'}
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                ) : (
+                  <div className="text-sm text-gray-500 italic">No additional properties available</div>
+                )}
+                
+                {selectedFeature.bbox && (
+                  <div className="mt-4 pt-4 border-t border-gray-200">
+                    <h5 className="font-semibold mb-2 text-sm" style={{ color: '#500000' }}>Geographic Extent:</h5>
+                    <div className="text-xs space-y-1">
+                      <div><span className="font-semibold">Min Lat:</span> {selectedFeature.bbox.minLat.toFixed(6)}</div>
+                      <div><span className="font-semibold">Max Lat:</span> {selectedFeature.bbox.maxLat.toFixed(6)}</div>
+                      <div><span className="font-semibold">Min Lon:</span> {selectedFeature.bbox.minLon.toFixed(6)}</div>
+                      <div><span className="font-semibold">Max Lon:</span> {selectedFeature.bbox.maxLon.toFixed(6)}</div>
+                    </div>
+                  </div>
+                )}
+                
+                {selectedFeature.points && (
+                  <div className="mt-4 pt-4 border-t border-gray-200">
+                    <h5 className="font-semibold mb-2 text-sm" style={{ color: '#500000' }}>Geometry:</h5>
+                    <div className="text-xs text-gray-600">
+                      {selectedFeature.points.length} vertices
+                    </div>
+                  </div>
+                )}
+              </div>
             </div>
+          )}
+
+          {/* Basemap Selector - Google Maps style */}
+          <div className="absolute bottom-6 left-6">
+            {showBasemapSelector ? (
+              <div className="bg-white rounded-lg shadow-lg overflow-hidden" style={{ width: '280px' }}>
+                <div className="flex items-center justify-between px-4 py-2 border-b border-gray-200" style={{ backgroundColor: '#f9fafb' }}>
+                  <h4 className="font-semibold text-sm">Basemaps</h4>
+                  <button
+                    onClick={() => setShowBasemapSelector(false)}
+                    className="text-gray-500 hover:text-gray-700 p-1"
+                    title="Close"
+                  >
+                    <X size={16} />
+                  </button>
+                </div>
+                <div className="p-3 grid grid-cols-2 gap-2">
+                  <button
+                    onClick={() => {
+                      setSelectedBasemap('street');
+                      setShowBasemapSelector(false);
+                    }}
+                    className={`relative rounded-lg overflow-hidden border-2 ${selectedBasemap === 'street' ? 'border-red-900' : 'border-gray-200'} hover:border-gray-400 transition-colors`}
+                    style={selectedBasemap === 'street' ? { borderColor: '#500000' } : {}}
+                  >
+                    <div className="aspect-square bg-gray-100 flex items-center justify-center">
+                      <div className="text-center">
+                        <Map size={32} className="mx-auto mb-1 text-gray-600" />
+                        <div className="text-xs font-medium">Street</div>
+                      </div>
+                    </div>
+                  </button>
+                  
+                  <button
+                    onClick={() => {
+                      setSelectedBasemap('satellite');
+                      setShowBasemapSelector(false);
+                    }}
+                    className={`relative rounded-lg overflow-hidden border-2 ${selectedBasemap === 'satellite' ? 'border-red-900' : 'border-gray-200'} hover:border-gray-400 transition-colors`}
+                    style={selectedBasemap === 'satellite' ? { borderColor: '#500000' } : {}}
+                  >
+                    <div className="aspect-square bg-gray-100 flex items-center justify-center">
+                      <div className="text-center">
+                        <img src="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='32' height='32' viewBox='0 0 24 24' fill='none' stroke='%23666' stroke-width='2'%3E%3Ccircle cx='12' cy='12' r='10'/%3E%3Cpath d='M12 2a14.5 14.5 0 0 0 0 20 14.5 14.5 0 0 0 0-20'/%3E%3Cpath d='M2 12h20'/%3E%3C/svg%3E" alt="Satellite" className="mx-auto mb-1" />
+                        <div className="text-xs font-medium">Satellite</div>
+                      </div>
+                    </div>
+                  </button>
+                  
+                  <button
+                    onClick={() => {
+                      setSelectedBasemap('light');
+                      setShowBasemapSelector(false);
+                    }}
+                    className={`relative rounded-lg overflow-hidden border-2 ${selectedBasemap === 'light' ? 'border-red-900' : 'border-gray-200'} hover:border-gray-400 transition-colors`}
+                    style={selectedBasemap === 'light' ? { borderColor: '#500000' } : {}}
+                  >
+                    <div className="aspect-square bg-gray-100 flex items-center justify-center">
+                      <div className="text-center">
+                        <div className="w-8 h-8 mx-auto mb-1 bg-gray-200 rounded"></div>
+                        <div className="text-xs font-medium">Light</div>
+                      </div>
+                    </div>
+                  </button>
+                  
+                  <button
+                    onClick={() => {
+                      setSelectedBasemap('dark');
+                      setShowBasemapSelector(false);
+                    }}
+                    className={`relative rounded-lg overflow-hidden border-2 ${selectedBasemap === 'dark' ? 'border-red-900' : 'border-gray-200'} hover:border-gray-400 transition-colors`}
+                    style={selectedBasemap === 'dark' ? { borderColor: '#500000' } : {}}
+                  >
+                    <div className="aspect-square bg-gray-100 flex items-center justify-center">
+                      <div className="text-center">
+                        <div className="w-8 h-8 mx-auto mb-1 bg-gray-700 rounded"></div>
+                        <div className="text-xs font-medium">Dark</div>
+                      </div>
+                    </div>
+                  </button>
+                </div>
+              </div>
+            ) : (
+              <button
+                onClick={() => setShowBasemapSelector(true)}
+                className="bg-white rounded-lg shadow-lg px-3 py-2 hover:bg-gray-50 flex items-center gap-2 text-sm font-medium"
+                title="Change Basemap"
+              >
+                <Layers size={18} />
+                <span>Basemaps</span>
+              </button>
+            )}
+          </div>
+
+          {/* Legend - Collapsible */}
+          <div className="absolute bottom-6 right-6">
+            {showLegend ? (
+              <div className="bg-white rounded-lg shadow-lg overflow-hidden">
+                <div className="flex items-center justify-between px-4 py-2 border-b border-gray-200" style={{ backgroundColor: '#f9fafb' }}>
+                  <h4 className="font-semibold text-sm">Legend</h4>
+                  <button
+                    onClick={() => setShowLegend(false)}
+                    className="text-gray-500 hover:text-gray-700 p-1"
+                    title="Close Legend"
+                  >
+                    <X size={16} />
+                  </button>
+                </div>
+                <div className="p-4 space-y-2 text-xs">
+                  {layers.find(l => l.id === 2)?.visible && selectedFeatureTypes.includes('city') && (
+                    <div className="flex items-center gap-2">
+                      <div className="w-6 h-4 rounded bg-red-500"></div>
+                      <span>Cities</span>
+                    </div>
+                  )}
+                  {layers.find(l => l.id === 3)?.visible && selectedFeatureTypes.includes('park') && (
+                    <div className="flex items-center gap-2">
+                      <div className="w-6 h-4 rounded bg-green-500"></div>
+                      <span>Parks</span>
+                    </div>
+                  )}
+                  {layers.find(l => l.id === 4)?.visible && selectedFeatureTypes.includes('imported_polygon') && (
+                    <div className="flex items-center gap-2">
+                      <div className="w-6 h-4 rounded border-2 border-purple-500 bg-purple-500 bg-opacity-20"></div>
+                      <span>Imported Polygons</span>
+                    </div>
+                  )}
+                  {userLocation && (
+                    <div className="flex items-center gap-2">
+                      <MapPin size={16} style={{ color: '#500000' }} />
+                      <span>Your Location</span>
+                    </div>
+                  )}
+                </div>
+              </div>
+            ) : (
+              <button
+                onClick={() => setShowLegend(true)}
+                className="bg-white rounded-lg shadow-lg px-3 py-2 hover:bg-gray-50 flex items-center gap-2 text-sm font-medium"
+                title="Show Legend"
+              >
+                <Layers size={18} />
+                <span>Legend</span>
+              </button>
+            )}
           </div>
         </div>
       </div>
